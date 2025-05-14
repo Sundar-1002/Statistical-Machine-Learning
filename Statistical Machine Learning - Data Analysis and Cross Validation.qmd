@@ -1,0 +1,284 @@
+---
+format: pdf
+editor: visual
+---
+
+## Exercise 4 - Data Analysis
+
+### 1. Implement logistic regression and support vector classifiers to predict paper breaks in the process given the numerical sensor reading features. Use an appropriate framework to compare and tune the different models, evaluating and discussing their relative merits. Select the best model for predicting potential paper breaks in the process.
+
+```{r,warning=FALSE,results='hide',message=FALSE}
+#Importing libraries
+library(ROCR)
+library(kernlab)
+#loading the dataset
+load("data_assignment_processminer.Rdata")
+```
+
+We take 20% of the total data as test data and 80% of total data as train and validation data.
+
+```{r}
+#Seperating Train and test datas
+n = nrow(data_processminer)
+set.seed(10000)
+test_index = sample(1:n, n * 0.2)
+test_data = data_processminer[test_index,]
+index = setdiff(1:n, test_index)
+data = data_processminer[index,]
+```
+
+```{r}
+#calculating number of 'break' and 'no_break' class
+no_of_break = data[data$y == "break",]
+no_of_no_break = data[data$y == "no_break",]
+cat("No of break class in the data set:", nrow(no_of_break),
+    "\nNo of no_break class in the data set:", nrow(no_of_no_break))
+```
+
+**F1 Score:**\
+Due to the severe class imbalance (89 "break" vs. 1472 "no_break"), I am going to use the **F1 score** to determine the optimal threshold. Unlike accuracy, which can be misleading in imbalanced datasets, the F1 score balances **precision** and **recall**, making it more suitable for evaluating minority class performance. In this context, **missing a break (false negative)** is more critical than a **false alarm (false positive)**. Therefore, optimizing for F1 helps ensure we identify breaks accurately without overly compromising on false positives.
+
+```{r}
+#Creating a function to calculate f1 score
+f1_score = function(predictions, y){
+  confusion = table(predictions, y)
+  if (all(dim(confusion) == c(2, 2))) {
+    precision = ifelse(sum(confusion[2, ]) == 0, 0, 
+                       confusion[2, 2] / sum(confusion[2, ]))
+    recall = ifelse(sum(confusion[, 2]) == 0, 0, 
+                    confusion[2, 2] / sum(confusion[, 2]))
+    if ((precision + recall) == 0) {f1 = 0} 
+    else {f1 = (2 * precision * recall) / (precision + recall)}
+  }else {f1 = 0}
+  return(f1)    
+}
+
+#Calculating other matrics
+calculate_metrics <- function(predictions, actual) {
+  confusion = table(predictions, actual)
+  if (all(dim(confusion) == c(2, 2))) {
+    TP = confusion[2, 2]  
+    TN = confusion[1, 1] 
+    FP = confusion[1, 2]  
+    FN = confusion[2, 1]  
+    sensitivity = TP / (TP + FN)
+    specificity = TN / (TN + FP)
+    f1 = f1_score(predictions, actual)
+    return(c(sensitivity = sensitivity, specificity = specificity, f1 = f1))
+  } else {
+    return(c(NA, NA, NA))
+  }
+}
+```
+
+**I** am going to use **K-fold cross-validation** over a **train-test split** because it allows each data point to be used in both training and validation phases. This approach helps produce a more **reliable estimate of model performance** by reducing **bias**, lowering **variance**, and minimizing the impact of **random fluctuations** in the data.
+
+#### Cross validation to find best threshold in Logistic Regression:
+
+I am going to **use** **cross validation** in **logistic regression** because **default 0.5** threshold is perhaps not ideal for **imbalanced datasets**.
+
+The below code performs **repeated 5-fold cross-validation (10 repeats)** to determine the **optimal classification threshold** for **logistic regression** based on the **F1 score**. Data is randomly divided into **5 folds** for every repeat. For every fold, the model is **trained** on 4 folds and **validated** on the remaining one. **Features are scaled** using the **training fold statistics** in order to avoid **data leakage**. The model gives **probabilities** on the validation set, and **thresholds in the range of 0 to 1** are experimented to find out which threshold gives the optimal **F1 score**. This is performed for all **folds** and **replications**. The **mean** of the best-performing thresholds for each fold is then used to select a **robust overall threshold** that maximizes **precision** and **recall** for **imbalanced data**.
+
+```{r,warning=FALSE}
+reps = 10
+K = 5
+results = data.frame(Replication = integer(),Fold = integer(),
+  Threshold = numeric(),f1 = numeric(),f1_train = numeric())
+for (rep in 1:reps) {
+  set.seed(10000*rep)
+  folds = rep(1:K, ceiling(nrow(data)/K))
+  folds = sample(folds)
+  folds = folds[1:nrow(data)]
+  for(k in 1:K){
+    k_train = which(folds != k)
+    k_validation = setdiff(1:nrow(data), k_train)
+    train_data = data[k_train,]
+    validation_data = data[k_validation,]
+    x_scale = scale(train_data[, -1])
+    train_data[, -1] = x_scale
+    validation_data[, -1] = scale(validation_data[, -1],
+        center = attr(x_scale, "scaled:center"),
+        scale = attr(x_scale, "scaled:scale"))
+    log_reg_fit = glm(y ~ ., data = train_data, family = "binomial")
+    probs = predict(log_reg_fit, newdata = validation_data, type = "response")
+    best_threshold = NULL
+    best_f1 = -Inf
+    y_test = as.factor(ifelse(validation_data$y == "break", 1, 0))
+    for (threshold in seq(0, 1, by = 0.05)) {
+      predictions = ifelse(probs >= threshold, 1, 0)
+      f1 = f1_score(as.factor(predictions), y_test)
+      if (f1 > best_f1) {
+        best_f1 = f1
+        best_threshold = threshold
+      }
+    }
+    results = rbind(results, data.frame(Replication = rep,Fold = k,
+      Threshold = best_threshold,f1 = best_f1))
+  }
+}
+best_threshold = mean(results$Threshold)
+cat("Average of best threshold value for Logistic Regression:", best_threshold)
+```
+
+The threshold value of **0.321** for Logistic Regression optimizes the model’s **F1 score** by balancing **precision** and **recall**. It suggests that the model is adjusted to minimize **false negatives** (missed "break" instances) at the cost of potentially increasing **false positives**. This threshold is likely to handle **class imbalance**, ensuring that the "break" class is detected with a reasonable probability cutoff (32.1%), improving overall performance in imbalanced datasets.
+
+#### Cross validation to find best C and Sigma values in SVC:
+
+The below code is designed to execute **repeated 5-fold cross-validation** (10 repeats) to obtain the optimal hyperparameters for a **Support Vector Classifier (SVC)** based on the **F1 score**. The data are **randomly shuffled** into 5 folds for all replications. The model is fitted over **4 folds** and then tested on the remaining fold in each iteration. The **features** are **scaled** with respect to the statistics of the **training data fold** to avoid **data leakage**. The model is trained and tested by changing **C** and **sigma** values from a **pre-defined grid**, and the **F1 score** is computed for each of these combinations. This is done for each fold and replication. The **F1 score** of each hyperparameter combination is averaged, and the values of **C** and **sigma** that yield the maximum **F1 score** are selected to be the **optimal parameters**.
+
+**Why type = "C-svc" and kernel = "rbfdot" in SVM?**
+
+**C-svc (C-Support Vector Classification):** With C-svc users can classify two categories—including breaking and non-breaking points within a paper. The C value enables users to regulate how their model balances between data fitting accuracy and model complexity. When C value is set to a small number the model becomes smoother with reduced overfitting but using higher C values enables better data fit. Due to its effective operation with two-element classification problems C-svc demonstrates suitability in paper break detection.
+
+**RBF Kernel (Radial Basis Function):** The RBF kernel enables the model to process complex data by transforming it into a higher dimension where class separation becomes simpler. The model performs effectively at finding advanced patterns within the data. The sigma value determines the distance over which data point influences affect the model thus enabling it to adapt to different data densities.
+
+```{r}
+R = 10
+K = 5
+C = c(1, 2, 5, 10, 20, 25, 30, 35)
+sigma = c(0.010, 0.015, 0.020, 0.025, 0.030)
+grid = expand.grid(C, sigma)
+colnames(grid) = c("C", "sigma")
+n_mod = nrow(grid)
+out = vector("list", R)
+for (r in 1:R) {
+  set.seed(10000*r)
+  f1_score_svc = matrix(NA, K, n_mod)
+  folds = rep(1:K, ceiling(nrow(data)/K))
+  folds = sample(folds)
+  folds = folds[1:nrow(data)]
+  for(k in 1:K){
+    k_train = which(folds != k)
+    k_validation = setdiff(1:nrow(data), k_train)
+    train_data = data[k_train,]
+    validation_data = data[k_validation,]
+    x_scale = scale(train_data[, -1])
+    train_data[, -1] = x_scale
+    validation_data[, -1] = scale(validation_data[, -1],
+        center = attr(x_scale, "scaled:center"),
+        scale = attr(x_scale, "scaled:scale"))
+    x_train = as.matrix(train_data[,-1])
+    y_train = as.factor(train_data[,1])
+    x_test = as.matrix(validation_data[,-1])
+    y_test = as.factor(validation_data[,1])
+    for (j in 1:n_mod) {
+      fit = ksvm(x_train, y_train, type = "C-svc",
+                  kernel = "rbfdot",
+                  C = grid$C[j], kpar = list(sigma = grid$sigma[j]))
+      pred = predict(fit, newdata = x_test)
+      f1_score_svc[k, j] = f1_score(pred, y_test)
+    }
+  }
+  out[[r]] = f1_score_svc
+}
+avg_fold_f1 = t( sapply(out, colMeans) )
+avg_f1 = colMeans(avg_fold_f1)
+grid_f1 = cbind(grid, avg_f1)
+best = which.max(grid_f1$avg_f1)
+best_c = grid_f1[best,]$C
+best_sigma = grid_f1[best,]$sigma
+cat("Best C:", best_c,"\nBest sigma:", best_sigma)
+```
+
+The best **C = 25** indicates a focus on minimizing **training errors**, possibly at the risk of **overfitting**, while **sigma = 0.01** suggests a more **localized decision boundary** for the **RBF kernel**, promoting **flexibility** without overfitting. Together, these values optimize the model for **accuracy** and **generalization**.
+
+#### Cross validation to find best model among Logistic Regression and SVC with best threshold, C and Sigma values:
+
+The below code performs **repeated 5-fold cross-validation** (10 repeats) to evaluate the performance of **Logistic Regression** and **Support Vector Classifier (SVC)** based on the **F1 score**. For each repetition, the data is split into 5 folds, with training and validation sets created for each fold. Both models are trained on the scaled training data and evaluated on the validation set using the best threshold for **Logistic Regression** and optimal **C** and **sigma** values for **SVC**. The **F1 score** for each model is computed and averaged across all repetitions and folds.
+
+```{r,warning=FALSE}
+reps = 10
+K=5
+f1_log = matrix(0, nrow = reps, ncol = K)
+f1_svc = matrix(0, nrow = reps, ncol = K)
+for(r in 1:reps){
+  set.seed(10000*r)
+  folds = rep(1:K, ceiling(nrow(data)/K))
+  folds = sample(folds)
+  folds = folds[1:nrow(data)]
+  for(k in 1:K){
+    k_train = which(folds != k)
+    k_validation = setdiff(1:nrow(data), k_train)
+    train_data = data[k_train,]
+    validation_data = data[k_validation,]
+    x_scale = scale(train_data[,-1])
+    train_data[,-1] = x_scale
+    validation_data[, -1] = scale(validation_data[, -1],
+        center = attr(x_scale, "scaled:center"),
+        scale = attr(x_scale, "scaled:scale"))
+    x_train = as.matrix(train_data[,-1])
+    y_train = as.factor(train_data[,1])
+    x_test = as.matrix(validation_data[,-1])
+    y_test = as.factor(validation_data[,1])
+    log_reg = glm(y ~ ., data = train_data, family = "binomial")
+    y_test_log = as.factor(ifelse(validation_data$y == "break", 1, 0))
+    probs = predict(log_reg, newdata = validation_data, type = "response")
+    predictions = ifelse(probs >= best_threshold, 1, 0)
+    f1_log[r,k] = f1_score(as.factor(predictions), y_test)
+    fit = ksvm(x_train, y_train, type = "C-svc",kernel = "rbfdot",
+                  C = best_c, kpar = list(sigma = best_sigma))
+    pred = predict(fit, newdata = x_test)
+    f1_svc[r,k] = f1_score(pred, y_test)
+  }
+}
+cat("F1 score of logistic regression:",mean(f1_log),
+    "\nF1 score of SVC:",mean(f1_svc))
+```
+
+The **F1 scores** of **Logistic Regression** (0.5177) and **SVC** (0.5333) show that **SVC** is slightly better overall. That is, **SVC** is slightly better at achieving the best trade-off between **precision** (correctly predicting the positives) and **recall** (correctly marking all the positive instances). While both models are good, **SVC** would likely be better at handling the **imbalanced data**, picking up more of the **minority class** (the "**break**" class) without overly boosting **false positives**. This very small margin suggests that **SVC** has a slightly improved **performance** on this particular task.
+
+### 2. Use appropriately some test data to evaluate the generalized predictive performance of the best selected classifier. Provide a discussion about the reliability of the selected model at predicting paper breaks in a real world scenario.
+
+Since **SVC** has a higher **F1 score** than **Logistic Regression**, we will use the **test data** to evaluate the performance of **SVC** with **C = 25** and **Sigma = 0.01**.\
+\
+The below code **scales** the **training (data)** and **test (test_data)** set features with the **training set statistics** to avoid **data leakage**. It then trains an **SVC** with an **RBF kernel** with the optimal **C** and **sigma** values. It **predicts** on the **test data** after training and calculates the **F1 score** to evaluate the model on the **test set**.
+
+```{r}
+x_scale = scale(data[,-1])
+data[,-1] = x_scale
+test_data[,-1] = scale(test_data[,-1],
+                  center = attr(x_scale,"scaled:center"),
+                  scale = attr(x_scale,"scaled:scale"))
+x_train = as.matrix(data[,-1])
+y_train = as.factor(data[,1])
+x_test = as.matrix(test_data[,-1])
+y_test = as.factor(test_data[,1])
+fit_svc = ksvm(x_train, y_train, type = "C-svc",kernel="rbfdot",
+               C = best_c, kpar = list(sigma = best_sigma))
+
+train_pred = predict(fit_svc, newdata = x_train)
+metrics_train = calculate_metrics(train_pred, y_train)
+
+test_pred = predict(fit_svc, newdata = x_test)
+metrics_test = calculate_metrics(test_pred, y_test)
+
+cat("\nTraining Sensitivity:", metrics_train[1],
+    "\nTraining Specificity:", metrics_train[2],
+    "\nTraining F1 Score:", metrics_train[3],
+    "\n\nTest Sensitivity:", metrics_test[1],
+    "\nTest Specificity:", metrics_test[2],
+    "\nTest F1 Score:", metrics_test[3])
+```
+
+**Calculating the f1 score only on the "break" class to better asses the performance of the model.**
+
+```{r}
+x_test_break = as.matrix(test_data[test_data$y == "break",-1])
+y_test_break = as.factor(test_data[test_data$y == "break",1])
+
+break_test_pred = predict(fit_svc, newdata = x_test_break)
+metrics_test = f1_score(break_test_pred, y_test_break)
+cat("\nF1 Score for 'break':", metrics_test)
+```
+
+The selected **SVC model** shows promising performance for predicting **paper breaks**. It is especially excellent with the **training set** with which it presents high **sensitivity** and **specificity**. This is because of doing proper **cross-validation** and tuning of **hyperparameters**.
+
+**Sensitivity** (0.8636): The system is **86.36% sensitive** to actual paper breaks, i.e., capturing most of the major occurrences. High **sensitivity** is critically useful in practice because it decreases the likelihood of failure to capture an instance of paper break, potentially resulting in costly **downtimes** or **production issues**.
+
+**Specificity** (0.9565): At **95.65% specificity**, the model is doing a very good job at not generating **false positives**. This is particularly desirable in **production environments** where false activity, such as **false alarms**, may be undesirable to operations or inefficiencies.
+
+**F1 Score** (0.67): The **F1 score** of **0.67** is a harmonic mean of **precision** and **recall**, indicating that the model is both efficient in detecting breaks and conservative in doing so without generating high false positives. So, this is most critical because in **real-world situations** where both **paper break omission** and **false alarm initiation** need to be reduced.
+
+**F1 Score for 'Break'**: The model attains an ideal balance between **precision** and **recall** with an F1 measure of **0.7037** for break prediction, ensuring **paper break detection** accurately.
+
+In a **real-world application** scenario, the model's **sensitivity** and **specificity** to paper breaks are high, and hence the model is a **useful** and **reliable** tool. Yes, there remains a scope for further improvement to reduce **false negatives** even further, but the model is perfectly suitable for deployment where **false alarms** and **downtime** must be minimized. An **F1 measure** of **0.67** is a good guarantee of overall performance with good **performance-risk trade-off**. To ensure optimal **real-time performance, continuous monitoring, periodic retraining, and human oversight are essential**.\
